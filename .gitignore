@@ -1,7 +1,13 @@
 .env
+.env.*
+!.env.example
 *.crt
 *.key
 *.run
 *.tar.gz
 nextcloud_data/
 ts_state/
+tailscale-data/*
+!tailscale-data/.gitkeep
+certs/*
+!certs/.gitkeep

@@ -1,46 +1,65 @@
 # ☁️ Nextcloud Vault Infrastructure
 
-> **Infraestrutura autogerenciada para Nextcloud focada em segurança (Zero Trust), privacidade e persistência de dados.**
+**Infraestrutura autogerenciada para Nextcloud focada em segurança Zero Trust, soberania de dados e resiliência de estado.**
 
-Este projeto implementa um ambiente de armazenamento em nuvem pessoal "hardened" (endurecido), utilizando contêineres e criptografia de disco para garantir a soberania dos dados.
+Este projeto implementa um ambiente de armazenamento em nuvem pessoal "hardened" (endurecido), utilizando orquestração de contêineres e criptografia de disco para garantir que os dados permaneçam sob controle estrito do proprietário, sem exposição à internet pública.
 
 ## 🏗️ Arquitetura do Projeto
 
-A solução foi desenhada para desacoplar a aplicação (efêmera) dos dados (persistentes), garantindo portabilidade e segurança em camadas.
+A solução foi desenhada para desacoplar a aplicação (efêmera) dos dados (persistentes), garantindo portabilidade e segurança em camadas (Defense in Depth).
 
 | Componente | Tecnologia | Papel Estratégico |
-| :--- | :--- | :--- |
-| **Orquestração** | **Podman Compose** | Gerenciamento de containers *daemonless* para maior segurança e menor overhead no host. |
-| **Rede Zero Trust** | **Tailscale** | Elimina a necessidade de expor portas na internet pública. Gerencia DNS (MagicDNS) e Certificados SSL automaticamente. |
-| **Segurança de Dados** | **LUKS (dm-crypt)** | Criptografia de disco em repouso (Data-at-Rest), protegendo fisicamente o HDD de armazenamento. |
-| **Performance** | **Redis** | Cache em memória para indexação de arquivos e *locking* transacional, reduzindo I/O no disco mecânico. |
-| **Banco de Dados** | **PostgreSQL** | Persistência relacional robusta, isolada em container dedicado. |
+| --- | --- | --- |
+| **Orquestração** | **Podman Compose** | Containers *daemonless* e *rootless*, reduzindo a superfície de ataque no host. |
+| **Rede Zero Trust** | **Tailscale** | Rede mesh overlay que elimina a exposição de portas WAN. Gerencia DNS (MagicDNS) e certificados SSL/TLS automaticamente. |
+| **Segurança de Dados** | **LUKS (dm-crypt)** | Criptografia de disco em repouso (Data-at-Rest), protegendo o HDD físico contra acesso não autorizado. |
+| **Persistência** | **Bind Mounts** | Estratégia de volumes locais com gestão de contextos SELinux, garantindo a identidade da VPN e certificados entre reboots. |
+| **Performance** | **Redis** | Cache em memória para indexação de arquivos e locking transacional. |
+
+## 📂 Estrutura de Diretórios & OpSec
+
+A organização de diretórios reflete uma política de segurança estrita, separando o código auditável de estados sensíveis e segredos.
+
+```text
+.
+├── certs/              # Certificados SSL/TLS (Mapeado com :z compartilhado)
+│   └── .gitkeep        # Estrutura mantida no Git, conteúdo ignorado
+├── tailscale-data/     # Identidade e Node ID da VPN (Mapeado com :Z privado)
+│   └── .gitkeep        # Garante a persistência da identidade do servidor
+├── .env.example        # Modelo de variáveis de ambiente
+├── .gitignore          # Proteção contra vazamento de segredos no repositório
+├── docker-compose.yml  # Infraestrutura como Código (IaC)
+└── setup_hdd.sh        # Automação de montagem do volume criptografado
+
+```
+
+**Nota sobre SELinux:** A infraestrutura utiliza sufixos `:Z` e `:z` nos volumes para compatibilidade nativa com políticas de segurança de distribuições RHEL/Fedora.
 
 ## 🧠 Princípios de Engenharia
 
-* **Segurança em Profundidade:** O acesso é restrito à VPN (Tailscale), o tráfego é criptografado (HTTPS) e o armazenamento físico é ilegível sem a chave (LUKS).
-* **Imutabilidade e IaC:** Toda a infraestrutura é definida como código (`compose.yaml`), permitindo recuperação rápida de desastres (Disaster Recovery).
-* **Eficiência de Recursos:** O uso do Podman e Redis permite que a stack rode com baixo consumo de CPU/RAM, maximizando a vida útil do hardware.
-
-## 🛠️ Tech Stack
-
-![Podman](https://img.shields.io/badge/Podman-892CA0?style=for-the-badge&logo=podman&logoColor=white)
-![Tailscale](https://img.shields.io/badge/Tailscale-1E1E1E?style=for-the-badge&logo=tailscale&logoColor=white)
-![PostgreSQL](https://img.shields.io/badge/PostgreSQL-316192?style=for-the-badge&logo=postgresql&logoColor=white)
-![Redis](https://img.shields.io/badge/redis-%23DD0031.svg?style=for-the-badge&logo=redis&logoColor=white)
-![Nextcloud](https://img.shields.io/badge/Nextcloud-0082C9?style=for-the-badge&logo=Nextcloud&logoColor=white)
-![Linux](https://img.shields.io/badge/Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black)
+* **Segurança em Profundidade:** Nenhuma porta é aberta no roteador. O acesso é exclusivo via VPN, com tráfego TLS e armazenamento físico criptografado.
+* **Resiliência de Identidade:** Diferente de implantações padrão em container, esta stack persiste o `tailscaled.state`, evitando que o servidor perca sua identidade e compartilhamentos ao ser reiniciado.
+* **Imutabilidade:** Toda a configuração da aplicação é definida via variáveis de ambiente no `.env`, facilitando o Disaster Recovery.
 
 ## ✅ Status Operacional
 
-Este projeto está em produção com as seguintes rotinas de manutenção ativas:
+* [x] **Backup 3-2-1:** Estratégia implementada (Local + HDD Externo + Cloud).
+* [x] **SSL/TLS:** Renovação automática de certificados via Tailscale.
+* [x] **Persistência:** Identidade da VPN protegida contra perda de estado.
 
-* [x] **Backups:** Estratégia 3-2-1 implementada (Local + HDD Externo + Nuvem Criptografada).
-* [x] **Monitoramento:** Healthchecks nativos configurados no `compose.yaml`.
-* [x] **Persistência:** Volumes montados em disco físico dedicado e criptografado.
+## 🚀 Configuração Rápida
 
-## 🚀 Como Implantar
+Este repositório contém a definição da infraestrutura. A implantação exige a preparação do ambiente local conforme o manual.
 
-Para instruções técnicas detalhadas de instalação, configuração de variáveis de ambiente e scripts de automação, consulte o manual de implantação:
+1. **Clone o projeto e prepare os arquivos:**
+```bash
+git clone https://github.com/seu-usuario/nextcloud-vault.git
+cd nextcloud-vault
+cp .env.example .env
 
-👉 **[Acesse o Manual de Instalação (INSTALL.md)](./INSTALL.md)**
+```
+
+
+2. **Siga o Manual Técnico:**
+Para detalhes sobre preparação de disco LUKS, permissões de pastas e geração de certificados SSL, acesse:
+👉 **[Manual de Implantação (INSTALL.md)](https://www.google.com/search?q=./INSTALL.md)**

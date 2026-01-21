@@ -5,13 +5,14 @@ services:
     container_name: ts-nextcloud
     hostname: nextcloud-atlas
     environment:
+      - TS_HOSTNAME=${TS_HOSTNAME}
       - TS_AUTHKEY=${TS_AUTHKEY}
       - TS_STATE_DIR=/var/lib/tailscale
       - TS_EXTRA_ARGS=--advertise-tags=tag:nextcloud
     volumes:
-      - ts_state:/var/lib/tailscale
+      - ./tailscale-data:/var/lib/tailscale:Z
       - /dev/net/tun:/dev/net/tun
-      - ~/certs:/certs_temp:z
+      - ./certs:/certs_temp:z
     cap_add:
       - NET_ADMIN
       - SYS_MODULE
@@ -88,5 +89,4 @@ services:
         /entrypoint.sh apache2-foreground
 
 volumes:
-  ts_state:
   db_data:
