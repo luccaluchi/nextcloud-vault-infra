@@ -1,24 +1,28 @@
 services:
-  # === 1. REDE ===
+  # === 1. REDE (VPN Zero Trust) ===
   tailscale:
     image: docker.io/tailscale/tailscale:latest
     container_name: ts-nextcloud
-    hostname: nextcloud-atlas
+    hostname: ${TS_HOSTNAME} # Usa o nome definido no .env
     environment:
       - TS_HOSTNAME=${TS_HOSTNAME}
       - TS_AUTHKEY=${TS_AUTHKEY}
+      - TS_TAILNET_NAME=${TS_TAILNET_NAME}
       - TS_STATE_DIR=/var/lib/tailscale
       - TS_EXTRA_ARGS=--advertise-tags=tag:nextcloud
     volumes:
+      # Estado persistente da VPN (Node ID)
       - ./tailscale-data:/var/lib/tailscale:Z
+      # Tunelamento
       - /dev/net/tun:/dev/net/tun
+      # Pasta temporária para gerar certificados (Compartilhada)
       - ./certs:/certs_temp:z
     cap_add:
       - NET_ADMIN
       - SYS_MODULE
     restart: unless-stopped
 
-  # === 2. BANCO DE DADOS (COM HEALTHCHECK) ===
+  # === 2. BANCO DE DADOS ===
   db:
     image: docker.io/library/postgres:16-alpine
     container_name: nextcloud-db
@@ -42,7 +46,7 @@ services:
     network_mode: service:tailscale
     restart: always
 
-  # === 3. APLICAÇÃO ===
+  # === 3. APLICAÇÃO (Nextcloud) ===
   app:
     image: docker.io/library/nextcloud:latest
     container_name: nextcloud-app
@@ -56,35 +60,43 @@ services:
       db:
         condition: service_healthy
     volumes:
+      # Dados brutos no HDD Criptografado
       - /mnt/hdd_dados/nextcloud:/var/www/html:z
-      - ~/certs/nextcloud.crt:/etc/ssl/certs/nextcloud.crt:ro
-      - ~/certs/nextcloud.key:/etc/ssl/private/nextcloud.key:ro
+      # Certificados SSL (Mapeando da pasta local ./certs)
+      - ./certs/nextcloud.crt:/etc/ssl/certs/nextcloud.crt:ro
+      - ./certs/nextcloud.key:/etc/ssl/private/nextcloud.key:ro
     environment:
       # Conexão Banco
       - POSTGRES_HOST=127.0.0.1
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      # Conexão Redis (Auto-configuração na primeira instalação)
+      # Conexão Redis
       - REDIS_HOST=127.0.0.1
-      # Admin Inicial (Auto-instalação)
+      # Admin Inicial
       - NEXTCLOUD_ADMIN_USER=${NEXTCLOUD_ADMIN_USER}
       - NEXTCLOUD_ADMIN_PASSWORD=${NEXTCLOUD_ADMIN_PASSWORD}
-      # Sistema
+      # Sistema & Performance
       - PHP_MEMORY_LIMIT=${PHP_MEMORY_LIMIT}
       - PHP_UPLOAD_LIMIT=${PHP_UPLOAD_LIMIT}
-      - NEXTCLOUD_TRUSTED_DOMAINS=nextcloud-atlas.tailc04555.ts.net
+      # Domínios confiáveis (Dinâmico: hostname + tailnet)
+      - NEXTCLOUD_TRUSTED_DOMAINS=${TS_HOSTNAME}.${TS_TAILNET_NAME}
       - OVERWRITEPROTOCOL=https
-      # Previne instalação se o config já existir (segurança)
+      # Previne reinstalação acidental
       - NEXTCLOUD_UPDATE=1 
     entrypoint: 
       - /bin/sh
       - -c
       - |
+        # Ativa módulos SSL e HTTP2 do Apache
         a2enmod ssl http2 headers
         echo "Protocols h2 http/1.1" >> /etc/apache2/apache2.conf
+        
+        # Substitui os certificados padrão ("snakeoil") pelos do Tailscale
         sed -i 's|/etc/ssl/certs/ssl-cert-snakeoil.pem|/etc/ssl/certs/nextcloud.crt|g' /etc/apache2/sites-available/default-ssl.conf
         sed -i 's|/etc/ssl/private/ssl-cert-snakeoil.key|/etc/ssl/private/nextcloud.key|g' /etc/apache2/sites-available/default-ssl.conf
+        
+        # Ativa o site seguro e inicia o Nextcloud
         a2ensite default-ssl
         /entrypoint.sh apache2-foreground
 

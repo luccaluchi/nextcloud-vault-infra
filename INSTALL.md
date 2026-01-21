@@ -99,10 +99,14 @@ podman exec ts-nextcloud tailscale status
 Gere os certificados usando o nome completo obtido acima. O comando abaixo salva os arquivos na pasta mapeada `./certs`:
 
 ```bash
+export $(grep -v '^#' .env | xargs)
+```
+
+```bash
 podman exec ts-nextcloud tailscale cert \
   --cert-file /certs_temp/nextcloud.crt \
   --key-file /certs_temp/nextcloud.key \
-  "SEU-HOSTNAME-COMPLETO.ts.net"
+  "${TS_HOSTNAME}.${TS_TAILNET_NAME}"
 
 ```
 
@@ -118,11 +122,23 @@ podman compose up -d
 Ative o Redis para cache e *file locking* transacional. Isso melhora drasticamente a performance da interface web:
 
 ```bash
+echo "Aguardando a conclusão da instalação do Nextcloud..."
+
+# Loop que verifica se o arquivo config.php já contém a flag 'installed' => true
+until podman exec nextcloud-app grep -q "'installed' => true," /var/www/html/config/config.php 2>/dev/null; do
+  echo "Ainda instalando... aguardando 5 segundos."
+  sleep 5
+done
+
+echo "Nextcloud instalado! Aplicando configurações do Redis..."
+
+# Agora os comandos rodam em sequência sem erros
 podman exec --user www-data nextcloud-app php occ config:system:set redis host --value=127.0.0.1
 podman exec --user www-data nextcloud-app php occ config:system:set redis port --value=6379
 podman exec --user www-data nextcloud-app php occ config:system:set memcache.local --value='\OC\Memcache\Redis'
 podman exec --user www-data nextcloud-app php occ config:system:set memcache.locking --value='\OC\Memcache\Redis'
 
+echo "Configurações aplicadas com sucesso."
 ```
 
 ## 🔧 Troubleshooting
