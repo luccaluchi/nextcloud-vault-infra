@@ -1,0 +1,7 @@
+.env
+*.crt
+*.key
+*.run
+*.tar.gz
+nextcloud_data/
+ts_state/

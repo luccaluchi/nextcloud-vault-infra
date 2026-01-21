@@ -1,0 +1,92 @@
+services:
+  # === 1. REDE ===
+  tailscale:
+    image: docker.io/tailscale/tailscale:latest
+    container_name: ts-nextcloud
+    hostname: nextcloud-atlas
+    environment:
+      - TS_AUTHKEY=${TS_AUTHKEY}
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_EXTRA_ARGS=--advertise-tags=tag:nextcloud
+    volumes:
+      - ts_state:/var/lib/tailscale
+      - /dev/net/tun:/dev/net/tun
+      - ~/certs:/certs_temp:z
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    restart: unless-stopped
+
+  # === 2. BANCO DE DADOS (COM HEALTHCHECK) ===
+  db:
+    image: docker.io/library/postgres:16-alpine
+    container_name: nextcloud-db
+    network_mode: service:tailscale
+    restart: always
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: docker.io/library/redis:alpine
+    container_name: nextcloud-redis
+    network_mode: service:tailscale
+    restart: always
+
+  # === 3. APLICAÇÃO ===
+  app:
+    image: docker.io/library/nextcloud:latest
+    container_name: nextcloud-app
+    network_mode: service:tailscale
+    restart: always
+    depends_on:
+      tailscale:
+        condition: service_started
+      redis:
+        condition: service_started
+      db:
+        condition: service_healthy
+    volumes:
+      - /mnt/hdd_dados/nextcloud:/var/www/html:z
+      - ~/certs/nextcloud.crt:/etc/ssl/certs/nextcloud.crt:ro
+      - ~/certs/nextcloud.key:/etc/ssl/private/nextcloud.key:ro
+    environment:
+      # Conexão Banco
+      - POSTGRES_HOST=127.0.0.1
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      # Conexão Redis (Auto-configuração na primeira instalação)
+      - REDIS_HOST=127.0.0.1
+      # Admin Inicial (Auto-instalação)
+      - NEXTCLOUD_ADMIN_USER=${NEXTCLOUD_ADMIN_USER}
+      - NEXTCLOUD_ADMIN_PASSWORD=${NEXTCLOUD_ADMIN_PASSWORD}
+      # Sistema
+      - PHP_MEMORY_LIMIT=${PHP_MEMORY_LIMIT}
+      - PHP_UPLOAD_LIMIT=${PHP_UPLOAD_LIMIT}
+      - NEXTCLOUD_TRUSTED_DOMAINS=nextcloud-atlas.tailc04555.ts.net
+      - OVERWRITEPROTOCOL=https
+      # Previne instalação se o config já existir (segurança)
+      - NEXTCLOUD_UPDATE=1 
+    entrypoint: 
+      - /bin/sh
+      - -c
+      - |
+        a2enmod ssl http2 headers
+        echo "Protocols h2 http/1.1" >> /etc/apache2/apache2.conf
+        sed -i 's|/etc/ssl/certs/ssl-cert-snakeoil.pem|/etc/ssl/certs/nextcloud.crt|g' /etc/apache2/sites-available/default-ssl.conf
+        sed -i 's|/etc/ssl/private/ssl-cert-snakeoil.key|/etc/ssl/private/nextcloud.key|g' /etc/apache2/sites-available/default-ssl.conf
+        a2ensite default-ssl
+        /entrypoint.sh apache2-foreground
+
+volumes:
+  ts_state:
+  db_data:
