@@ -1,162 +1,174 @@
-# ⚙️ Manual de Implantação Técnica
+# ⚙️ Manual de Implantação Técnica (Nextcloud Vault)
 
-Este documento detalha o procedimento passo-a-passo para replicar a infraestrutura do Nextcloud Vault.
+Este documento detalha o procedimento para implantar a infraestrutura "Zero Trust" do Nextcloud Vault.
 
-**Pré-requisitos:**
+**Status da Automação:**
 
-* Linux (Fedora/RHEL ou Debian/Ubuntu)
-* Podman instalado (Rootless recomendado)
-* HDD secundário formatado e criptografado com LUKS
-* Conta ativa no Tailscale
+* ✅ Certificados SSL (Tailscale/Let's Encrypt): **Automático**
+* ✅ Renovação de Certificados: **Automático**
+* ✅ Configuração de Domínios Confiáveis: **Automático**
+* ✅ Otimização Redis (Cache/Locking): **Automático**
 
 ---
 
-## ⚠️ 1. Preparação do Disco (LUKS)
+## ⚠️ CRÍTICO: LEIA ANTES DE INICIAR (Rate Limits)
 
-O script de automação requer exclusividade sobre o dispositivo. Certifique-se de que ele não está montado automaticamente pela interface gráfica do Linux.
+O sistema de geração de certificados HTTPS possui limites de segurança estritos impostos pela Let's Encrypt.
+
+1. **Não apague a pasta `./certs`:** Se você reiniciar ou recriar os containers, o sistema reutilizará os certificados existentes. Se você apagar essa pasta e tentar gerar de novo muitas vezes, **você será bloqueado**.
+2. **Sintoma de Bloqueio:** Se o comando de subida parecer "travado" no log com a mensagem `⚠️ Falha no certificado...`, você atingiu o limite.
+3. **Solução de Emergência:** Se for bloqueado, edite o arquivo `.env` e mude o `TS_HOSTNAME` (ex: de `nextcloud` para `nextcloud-v2`) para obter uma nova identidade.
+
+---
+
+## 🐧 1. Preparação do Sistema Host (Tuning)
+
+Para garantir a performance do Tailscale (UDP) e a estabilidade do Redis, aplique as configurações de kernel abaixo no seu sistema Linux (Fedora/RHEL/Debian).
+
+Crie o arquivo de configuração persistente:
 
 ```bash
-# Identifique seu mapper LUKS
-ls /dev/mapper/
+# 1. Criar arquivo de parâmetros do kernel
+sudo nano /etc/sysctl.d/99-nextcloud-infra.conf
 
-# Feche o dispositivo (substitua pelo seu UUID ou nome do mapper)
-sudo cryptsetup close luks-SEU-UUID-AQUI
+# 2. Cole o conteúdo abaixo:
+# ---
+# Permite que o Redis gerencie memória em cenários de pouca RAM (evita falhas de salvamento)
+vm.overcommit_memory = 1
+
+# Aumenta buffers UDP para performance do Tailscale (DERP/WireGuard)
+net.core.rmem_max = 7500000
+net.core.wmem_max = 7500000
+# ---
+
+# 3. Aplique as mudanças imediatamente
+sudo sysctl -p /etc/sysctl.d/99-nextcloud-infra.conf
 
 ```
 
 ## 🛡️ 2. Estrutura de Diretórios e Permissões
 
-Prepare as pastas locais no diretório do projeto. Isso garante que o Podman tenha permissão de escrita e que o estado do Tailscale seja salvo corretamente no disco.
+Prepare as pastas locais. Isso garante persistência dos dados e permissão de escrita para os containers.
 
 ```bash
-# Crie as pastas locais (no mesmo diretório do compose.yaml)
-mkdir -p ./certs
-mkdir -p ./tailscale-data
+# Crie as pastas na raiz do projeto
+mkdir -p ./certs ./tailscale-data ./db_data
 
-# Ajuste as permissões de segurança
-# ./tailscale-data: Privado (700) - contém a identidade da VPN e chaves
+# Ajuste permissões críticas
+# ./tailscale-data: Privado (700) - Identidade da VPN
 chmod 700 ./tailscale-data
 
-# ./certs: Compartilhado (775) - acessível para containers web e usuário
+# ./certs: Compartilhado (775) - Acessível para Tailscale e Nextcloud
 chmod 775 ./certs
 
 ```
 
 ## 💾 3. Configuração do Storage (`setup_hdd.sh`)
 
-Edite o script `setup_hdd.sh` na raiz do projeto e insira o UUID do seu disco físico.
+Se estiver usando um HDD externo criptografado, certifique-se de que ele **não** está montado automaticamente pela interface gráfica. Use o script incluído:
 
 ```bash
-# Edite as variáveis UUID_LUKS e PONTO_MONTAGEM
+# Edite as variáveis UUID_LUKS e PONTO_MONTAGEM se necessário
 nano setup_hdd.sh
 
-# Execute a montagem
+# Execute a montagem (descriptografa e monta o volume)
 sudo ./setup_hdd.sh
 
 ```
 
 ## 🔐 4. Variáveis de Ambiente (.env)
 
-O repositório inclui um arquivo de exemplo. Copie-o e edite as credenciais. **Use aspas simples** nas senhas para evitar erros de interpretação do shell.
+Copie o modelo e preencha suas credenciais.
 
 ```bash
-# Copie o exemplo para o arquivo real
 cp .env.example .env
-
-# Edite os valores
 nano .env
+
 ```
 
-## 🌐 5. Configuração do Tailscale (Web)
+**Pontos de Atenção:**
 
-Acesse o Painel Administrativo do Tailscale:
+* `TS_AUTHKEY`: Gere uma chave **Reutilizável** e **Ephemeral** (opcional) no painel do Tailscale.
+* `TS_HOSTNAME`: O nome que sua máquina terá na VPN (ex: `cloud-server`).
+* `TS_TAILNET_NAME`: Seu domínio Tailscale (ex: `tailc1234.ts.net`).
 
-1. Ative **MagicDNS** e **HTTPS Certificates** na aba DNS.
-2. Gere uma **Auth Key** nova, preferencialmente com uma Tag (ex: `tag:nextcloud`).
-3. Nas configurações da máquina (após subir a primeira vez), ative **"Disable key expiry"** para evitar desconexão a cada 6 meses.
+## 🌐 5. Configuração no Painel Tailscale
 
-## 🚀 6. Execução e Deploy
+Antes de subir, acesse [login.tailscale.com/admin/dns](https://login.tailscale.com/admin/dns):
 
-Siga a ordem estrita para garantir a geração dos certificados SSL antes da aplicação subir:
+1. Ative **MagicDNS**.
+2. Ative **HTTPS Certificates**.
 
-### Passo 6.1: Subir a Rede VPN
+## 🚀 6. Execução (Deploy Automatizado)
+
+Diferente da versão anterior, agora **um único comando** gerencia toda a orquestração (VPN, Certificados e Aplicação).
 
 ```bash
-podman compose up -d tailscale
+podman-compose up -d
 
 ```
 
-### Passo 6.2: Gerar Certificados
+### 6.1 Monitoramento da Instalação
 
-Primeiro, verifique o nome completo da máquina na VPN:
+A primeira inicialização pode demorar de 1 a 3 minutos enquanto o certificado SSL é gerado. **Não interrompa o processo.**
+
+Acompanhe o log da VPN para saber quando terminar:
 
 ```bash
-podman exec ts-nextcloud tailscale status
-# Exemplo de saída: nextcloud-server.shark-banana.ts.net
+podman logs -f ts-nextcloud
 
 ```
 
-Gere os certificados usando o nome completo obtido acima. O comando abaixo salva os arquivos na pasta mapeada `./certs`:
+**Sequência de Sucesso Esperada:**
+
+1. `✅ Socket encontrado!`
+2. `✅ VPN Ativa: 100.x.y.z`
+3. `🎯 Domínio alvo configurado: nextcloud.seu-dominio.ts.net`
+4. `🎉 SUCESSO! Certificado gerado em /certs_temp.`
+
+*Assim que a mensagem de sucesso aparecer, o container do Nextcloud detectará os arquivos automaticamente e iniciará o servidor Web.*
+
+## ⚡ 7. Verificação Pós-Instalação
+
+O script de inicialização configura automaticamente o **Redis** e os **Trusted Domains**. Você pode verificar se tudo subiu corretamente acessando a URL:
+
+`https://<TS_HOSTNAME>.<TS_TAILNET_NAME>`
+
+Para confirmar se o Redis está ativo dentro do container:
 
 ```bash
-export $(grep -v '^#' .env | xargs)
-```
-
-```bash
-podman exec ts-nextcloud tailscale cert \
-  --cert-file /certs_temp/nextcloud.crt \
-  --key-file /certs_temp/nextcloud.key \
-  "${TS_HOSTNAME}.${TS_TAILNET_NAME}"
+podman exec -u www-data nextcloud-app php occ config:system:get redis
+# Deve retornar host: 127.0.0.1 e port: 6379
 
 ```
 
-### Passo 6.3: Subir a Aplicação
-
-```bash
-podman compose up -d
-
-```
-
-## ⚡ 7. Pós-Instalação (Otimização)
-
-Ative o Redis para cache e *file locking* transacional. Isso melhora drasticamente a performance da interface web:
-
-```bash
-echo "Aguardando a conclusão da instalação do Nextcloud..."
-
-# Loop que verifica se o arquivo config.php já contém a flag 'installed' => true
-until podman exec nextcloud-app grep -q "'installed' => true," /var/www/html/config/config.php 2>/dev/null; do
-  echo "Ainda instalando... aguardando 5 segundos."
-  sleep 5
-done
-
-echo "Nextcloud instalado! Aplicando configurações do Redis..."
-
-# Agora os comandos rodam em sequência sem erros
-podman exec --user www-data nextcloud-app php occ config:system:set redis host --value=127.0.0.1
-podman exec --user www-data nextcloud-app php occ config:system:set redis port --value=6379
-podman exec --user www-data nextcloud-app php occ config:system:set memcache.local --value='\OC\Memcache\Redis'
-podman exec --user www-data nextcloud-app php occ config:system:set memcache.locking --value='\OC\Memcache\Redis'
-
-echo "Configurações aplicadas com sucesso."
-```
+---
 
 ## 🔧 Troubleshooting
 
-**Conflito de Identidade (Hostname "Unknown"):**
-Se o hostname aparecer como "unknown" ou houver conflito de chaves, realize um Hard Reset limpando a pasta local de estado:
+**1. Terminal travado em "Solicitando Certificado SSL..."**
+
+* **Causa:** Rate Limit do Let's Encrypt ou DNS não propagado.
+* **Ação:** Se durar mais de 2 minutos, pare (`Ctrl+C`). Mude o `TS_HOSTNAME` no `.env` e suba novamente.
+
+**2. Erro "Access through untrusted domain"**
+
+* **Causa:** O container subiu antes do certificado ou variável de ambiente incorreta.
+* **Ação:** O novo `compose` corrige isso no boot. Se persistir, force a atualização manual:
+```bash
+podman exec -u www-data nextcloud-app php occ config:system:set trusted_domains 1 --value="SEU.DOMINIO.COMPLETO"
+
+```
+
+
+
+**3. Reset Total (Hard Reset)**
+Se precisar reinstalar do zero (cuidado, isso apaga a identidade da VPN):
 
 ```bash
-# 1. Derrube a stack
-podman compose down
-
-# 2. Limpe o estado LOCAL do Tailscale (Isso apaga a identidade da VPN)
-# CUIDADO: Este comando apaga tudo dentro da pasta de dados do Tailscale
-rm -rf ./tailscale-data/*
-
-# 3. Remova a máquina antiga ("Offline") do painel Web do Tailscale
-
-# 4. Suba novamente (uma nova identidade será gerada)
-podman compose up -d
+podman-compose down
+sudo rm -rf ./tailscale-data/*
+# Opcional: rm -rf ./certs/* (Só faça isso se os certificados estiverem inválidos)
+podman-compose up -d
 
 ```

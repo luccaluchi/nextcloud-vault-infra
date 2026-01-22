@@ -1,25 +1,65 @@
 services:
-  # === 1. REDE (VPN Zero Trust) ===
+  # === 1. REDE (VPN Zero Trust + Certificados) ===
   tailscale:
     image: docker.io/tailscale/tailscale:latest
     container_name: ts-nextcloud
-    hostname: ${TS_HOSTNAME} # Usa o nome definido no .env
+    hostname: ${TS_HOSTNAME}
     environment:
       - TS_HOSTNAME=${TS_HOSTNAME}
       - TS_AUTHKEY=${TS_AUTHKEY}
       - TS_TAILNET_NAME=${TS_TAILNET_NAME}
+      # [CORREÇÃO] Montamos o domínio aqui para garantir que ele exista
+      - TS_CERT_DOMAIN=${TS_HOSTNAME}.${TS_TAILNET_NAME}
       - TS_STATE_DIR=/var/lib/tailscale
-      - TS_EXTRA_ARGS=--advertise-tags=tag:nextcloud
-    volumes:
-      # Estado persistente da VPN (Node ID)
-      - ./tailscale-data:/var/lib/tailscale:Z
-      # Tunelamento
+      - TS_USERSPACE=false
+      - TS_EXTRA_ARGS=--advertise-tags=tag:nextcloud --netfilter-mode=off
+    security_opt:
+      - label=disable
+    devices:
       - /dev/net/tun:/dev/net/tun
-      # Pasta temporária para gerar certificados (Compartilhada)
-      - ./certs:/certs_temp:z
     cap_add:
       - NET_ADMIN
-      - SYS_MODULE
+      - NET_RAW
+    volumes:
+      - ./tailscale-data:/var/lib/tailscale:Z
+      - ./certs:/certs_temp:z
+    
+    command: 
+      - /bin/sh
+      - -c
+      - |
+        /usr/local/bin/containerboot &
+        PID=$!
+        
+        echo "⏳ [1/3] Aguardando Socket..."
+        until [ -S /var/run/tailscale/tailscaled.sock ]; do sleep 1; done
+        
+        echo "⏳ [2/3] Aguardando IP da VPN..."
+        while ! tailscale ip -4 | grep -q "^100\."; do sleep 2; done
+        echo "✅ VPN Ativa: $(tailscale ip -4)"
+        
+        # Debug visual para garantir que a variável chegou correta
+        echo "🎯 Domínio alvo configurado: '$TS_CERT_DOMAIN'"
+        
+        echo "⏳ [3/3] Solicitando Certificado SSL..."
+        # Loop infinito até conseguir o certificado
+        until tailscale cert \
+          --cert-file /certs_temp/nextcloud.crt \
+          --key-file /certs_temp/nextcloud.key \
+          "$TS_CERT_DOMAIN"; do
+            echo "⚠️ Falha (Erro 500 = Domínio incorreto ou Backoff). Tentando em 20s..."
+            sleep 20
+        done
+        
+        echo "🎉 SUCESSO! Certificado gerado em /certs_temp."
+        wait $PID
+
+    healthcheck:
+      test: ["CMD-SHELL", "tailscale status | grep -q '100.' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     restart: unless-stopped
 
   # === 2. BANCO DE DADOS ===
@@ -28,6 +68,9 @@ services:
     container_name: nextcloud-db
     network_mode: service:tailscale
     restart: always
+    depends_on:
+      tailscale:
+        condition: service_healthy
     volumes:
       - db_data:/var/lib/postgresql/data
     environment:
@@ -45,6 +88,9 @@ services:
     container_name: nextcloud-redis
     network_mode: service:tailscale
     restart: always
+    depends_on:
+      tailscale:
+        condition: service_healthy
 
   # === 3. APLICAÇÃO (Nextcloud) ===
   app:
@@ -54,51 +100,60 @@ services:
     restart: always
     depends_on:
       tailscale:
-        condition: service_started
-      redis:
-        condition: service_started
+        condition: service_healthy
       db:
         condition: service_healthy
+      redis:
+        condition: service_started
     volumes:
-      # Dados brutos no HDD Criptografado
       - /mnt/hdd_dados/nextcloud:/var/www/html:z
-      # Certificados SSL (Mapeando da pasta local ./certs)
-      - ./certs/nextcloud.crt:/etc/ssl/certs/nextcloud.crt:ro
-      - ./certs/nextcloud.key:/etc/ssl/private/nextcloud.key:ro
+      - ./certs:/certs_tailscale:ro
     environment:
-      # Conexão Banco
       - POSTGRES_HOST=127.0.0.1
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      # Conexão Redis
       - REDIS_HOST=127.0.0.1
-      # Admin Inicial
       - NEXTCLOUD_ADMIN_USER=${NEXTCLOUD_ADMIN_USER}
       - NEXTCLOUD_ADMIN_PASSWORD=${NEXTCLOUD_ADMIN_PASSWORD}
-      # Sistema & Performance
       - PHP_MEMORY_LIMIT=${PHP_MEMORY_LIMIT}
       - PHP_UPLOAD_LIMIT=${PHP_UPLOAD_LIMIT}
-      # Domínios confiáveis (Dinâmico: hostname + tailnet)
       - NEXTCLOUD_TRUSTED_DOMAINS=${TS_HOSTNAME}.${TS_TAILNET_NAME}
       - OVERWRITEPROTOCOL=https
-      # Previne reinstalação acidental
       - NEXTCLOUD_UPDATE=1 
     entrypoint: 
       - /bin/sh
       - -c
       - |
-        # Ativa módulos SSL e HTTP2 do Apache
-        a2enmod ssl http2 headers
-        echo "Protocols h2 http/1.1" >> /etc/apache2/apache2.conf
+        echo "⏳ Aguardando certificados aparecerem em /certs_tailscale..."
+        while [ ! -f /certs_tailscale/nextcloud.crt ]; do sleep 5; done
         
-        # Substitui os certificados padrão ("snakeoil") pelos do Tailscale
+        echo "✅ Certificados encontrados! Configurando..."
+        cp /certs_tailscale/nextcloud.crt /etc/ssl/certs/nextcloud.crt
+        cp /certs_tailscale/nextcloud.key /etc/ssl/private/nextcloud.key
+
+        a2enmod ssl http2 headers
+        if ! grep -q "Protocols h2 http/1.1" /etc/apache2/apache2.conf; then
+          echo "Protocols h2 http/1.1" >> /etc/apache2/apache2.conf
+        fi
+        
         sed -i 's|/etc/ssl/certs/ssl-cert-snakeoil.pem|/etc/ssl/certs/nextcloud.crt|g' /etc/apache2/sites-available/default-ssl.conf
         sed -i 's|/etc/ssl/private/ssl-cert-snakeoil.key|/etc/ssl/private/nextcloud.key|g' /etc/apache2/sites-available/default-ssl.conf
-        
-        # Ativa o site seguro e inicia o Nextcloud
         a2ensite default-ssl
-        /entrypoint.sh apache2-foreground
+        
+        if [ -f /var/www/html/config/config.php ]; then
+            # === FIX TRUSTED DOMAINS ===
+            # Garante que o domínio da variável de ambiente esteja na lista
+            echo "🔐 Atualizando Trusted Domains..."
+            su -s /bin/sh www-data -c "php occ config:system:set trusted_domains 1 --value=${NEXTCLOUD_TRUSTED_DOMAINS}"
+            
+            # Configuração do Redis
+            su -s /bin/sh www-data -c "php occ config:system:set redis host --value=127.0.0.1"
+            su -s /bin/sh www-data -c "php occ config:system:set redis port --value=6379"
+            su -s /bin/sh www-data -c "php occ config:system:set memcache.local --value='\OC\Memcache\Redis'"
+            su -s /bin/sh www-data -c "php occ config:system:set memcache.locking --value='\OC\Memcache\Redis'"
+        fi
 
+        /entrypoint.sh apache2-foreground
 volumes:
   db_data:
